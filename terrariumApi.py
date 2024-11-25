@@ -1,65 +1,65 @@
-from fastapi import FastAPI
-import board
-import time
-import adafruit_dht
 import subprocess
 import random
-import base64
 import os
+import time
+import io
+from fastapi import FastAPI, HTTPException, Security, Depends
+from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
+
+# Load environment variables
+from dotenv import load_dotenv
+
+load_dotenv()  # Automatically load variables from .env if used
 
 app = FastAPI()
 
-# init DHT22 Temp/Hum Sensor on GPIO pin 4
-dht_device = adafruit_dht.DHT22(board.D4)
+# Environment variables
+API_KEY = os.getenv("API_KEY")
+DRIVE_CREDENTIALS_PATH = os.getenv("DRIVE_CREDENTIALS_PATH")
+IMAGE_DIR = os.getenv("IMAGE_PATH", "/tmp/images/")  # Default if not set
 
+# Middleware: Enable CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Change this to specific origins in production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
+# Secure the endpoint with an API key
+api_key_header = APIKeyHeader(name="X-API-Key")
 
+async def verify_api_key(api_key: str = Security(api_key_header)):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Unauthorized")
 
-def read_sensor():
-	try:
-		#read temp and hum
-		temperature_celsius = dht_device.temperature
-		humidity = dht_device.humidity
-		
-		#convert temp to F
-		temperature_fahrenheit = (temperature_celsius * 9 / 5) + 32
-		
-		# return data as dict
-		if temperature_celsius is not None and humidity is not None:
-			return {"temperature_celsius": temperature_celsius, "temperature_fahrenheit": temperature_fahrenheit, "humidity": humidity}
-		else:
-			return {"error": "Failed to read from DHT sensor"}
-	except Exception as e:
-		return {"error": str(e)}
+@app.get("/camera/", dependencies=[Depends(verify_api_key)])
+async def capture_and_upload_image():
+    # Check if the image directory exists, create if not
+    if not os.path.exists(IMAGE_DIR):
+        os.makedirs(IMAGE_DIR)
 
+    # Generate a unique image path with a random number
+    random_number = random.randint(1000, 9999)
+    image_path = os.path.join(IMAGE_DIR, f"captured_image_{random_number}.jpg")
 
-@app.get("/")
-def read_root():
-	return {"message": "Welcome to the Terrarium API!"}
-	
-@app.get("/sensor")
-def get_sensor_data():
-	# process or save data here
-	data = read_sensor()
-	return data
-	
-@app.get("/camera")
-def camera_capture():
-	random_number = random.randint(1000,9999)
-	image_path = f"/home/juan-pi/Desktop/img_{random_number}.jpg"
-	subprocess.run(["libcamera-still",
-					"--nopreview",
-					"--datetime",
-					"--quality", "90",
-					"-o", image_path])
-					
-	while not os.path.exists(image_path):
-		time.sleep(0.1)
-		if(os.path.exists(image_path)):
-			continue
-					
-	with open(image_path, "rb") as image_file:
-		image_data = base64.b64encode(image_file.read()).decode("utf-8")
-	
-	return {"image_data": image_data}
+    # Capture image using libcamera
+    subprocess.run(["libcamera-still", "-t", "2000", "-o", image_path])
 
+    # Wait for the image to be created
+    while not os.path.exists(image_path):
+        time.sleep(0.1)  # Check every 100ms
+
+    # Upload image to Google Drive (you can implement this as per your needs)
+
+    # Read the image file and return it as a response
+    with open(image_path, "rb") as image_file:
+        image_data = image_file.read()
+
+    return {
+        "status": "Image captured and uploaded successfully",
+        "image": StreamingResponse(io.BytesIO(image_data), media_type="image/jpeg")
+    }
